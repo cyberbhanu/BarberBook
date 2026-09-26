@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 
 const scrypt = promisify(scryptCallback);
 const port = Number(process.env.PORT || 8787);
+const host = process.env.HOST || '0.0.0.0';
 const dbPath = resolve(process.env.BARBERBOOK_DB || 'api/data.json');
 const sessions = new Map();
 const seedServices = [
@@ -252,6 +253,6 @@ async function main() {
   createServer((req, res) => route(req, res).catch((error) => {
     console.error(error);
     if (!res.headersSent) json(res, error.status || 500, { error: error.status ? error.message : 'The server could not complete the request.' });
-  })).listen(port, '127.0.0.1', () => console.log(`BarberBook API listening at http://127.0.0.1:${port}`));
+  })).listen(port, host, () => console.log(`BarberBook API listening at http://${host}:${port}`));
 }
 main().catch((e) => { console.error(e); process.exitCode = 1; });

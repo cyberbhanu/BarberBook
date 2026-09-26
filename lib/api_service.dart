@@ -1,9 +1,20 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 class BarberBookApi {
-  BarberBookApi({this.baseUrl = 'http://127.0.0.1:8787'});
+  BarberBookApi({String? baseUrl}) : baseUrl = baseUrl ?? _defaultBaseUrl;
+
+  static const _configuredBaseUrl = String.fromEnvironment('API_BASE_URL');
+  static String get _defaultBaseUrl {
+    if (_configuredBaseUrl.isNotEmpty) return _configuredBaseUrl;
+    // Android emulators reach the host machine through this special address.
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      return 'http://10.0.2.2:8787';
+    }
+    return 'http://127.0.0.1:8787';
+  }
 
   final String baseUrl;
   String? token;

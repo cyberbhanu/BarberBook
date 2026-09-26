@@ -308,7 +308,16 @@ class _BookingShellState extends State<BookingShell> {
           child: const Icon(Icons.content_cut_rounded, color: gold, size: 19)),
         const SizedBox(width: 10), Text(mode == 0 ? 'BarberBook' : mode == 1 ? 'Barber Portal' : 'Admin Panel', style: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: -.4)),
       ]), actions: [IconButton(tooltip: 'Change password', onPressed: changePasswordDialog, icon: const Icon(Icons.key_rounded)), IconButton(tooltip: 'Log out', onPressed: signOut, icon: const Icon(Icons.logout_rounded)), const SizedBox(width: 5)]),
-      body: SafeArea(child: pages[tab]),
+      body: SafeArea(
+        child: Center(
+          // Keep touch targets comfortable on phones and prevent stretched
+          // cards/forms on tablets and desktop-sized windows.
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 900),
+            child: SizedBox(width: double.infinity, child: pages[tab]),
+          ),
+        ),
+      ),
       bottomNavigationBar: NavigationBar(height: 70, selectedIndex: tab, onDestinationSelected: (i) => setState(() => tab = i),
         backgroundColor: Colors.white, indicatorColor: gold.withValues(alpha: .18),
         destinations: destinations),
