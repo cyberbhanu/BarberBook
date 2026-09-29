@@ -1,7 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import 'api_service.dart';
 import 'booking_export.dart';
 
@@ -75,6 +80,8 @@ class _BookingShellState extends State<BookingShell> {
   DateTime adminBookingDate = DateTime.now();
   int mode = 0; // 0: customer, 1: barber, 2: admin
   bool requestAccepted = false;
+  bool locationLoading = false;
+  String currentLocationLabel = 'Tap to use your location';
   Barber? selectedBarber;
   String? selectedServiceFilter;
   String selectedService = 'Haircut';
@@ -190,6 +197,7 @@ class _BookingShellState extends State<BookingShell> {
         tab = 0;
       });
       await refreshData();
+      if (mode == 0) refreshCurrentLocation();
     } catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
     }
@@ -229,6 +237,63 @@ class _BookingShellState extends State<BookingShell> {
   Future<void> signOut() async {
     try { await api.post('/auth/logout', {}); } catch (_) {}
     setState(() { api.token = null; currentUser = null; currentBarber = null; signedIn = false; mode = 0; tab = 0; remoteBookings = []; });
+  }
+
+  Future<void> refreshCurrentLocation() async {
+    if (locationLoading || mode != 0) return;
+    setState(() { locationLoading = true; currentLocationLabel = 'Finding your location…'; });
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        throw Exception('Turn on location services, then tap to try again.');
+      }
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
+        throw Exception('Allow location access in your device or browser settings, then tap to try again.');
+      }
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.medium, timeLimit: Duration(seconds: 15)),
+      );
+      String label;
+      if (kIsWeb) {
+        final uri = Uri.https('nominatim.openstreetmap.org', '/reverse', {
+          'format': 'jsonv2', 'lat': position.latitude.toString(), 'lon': position.longitude.toString(),
+          'zoom': '10', 'addressdetails': '1',
+        });
+        final response = await http.get(uri).timeout(const Duration(seconds: 8));
+        if (response.statusCode != 200) throw Exception('Could not look up the nearby area.');
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final address = data['address'] as Map<String, dynamic>? ?? {};
+        label = (address['city'] ?? address['town'] ?? address['village'] ?? address['suburb'] ?? address['county'] ?? 'Current location').toString();
+        final state = address['state']?.toString();
+        if (state != null && state.isNotEmpty) label = '$label, $state';
+      } else {
+        final marks = await Geocoding().placemarkFromCoordinates(position.latitude, position.longitude);
+        if (marks.isEmpty) {
+          label = '${position.latitude.toStringAsFixed(3)}, ${position.longitude.toStringAsFixed(3)}';
+        } else {
+          final place = marks.first;
+          final area = place.locality?.isNotEmpty == true ? place.locality : place.subAdministrativeArea;
+          final region = place.administrativeArea;
+          label = [area, region].whereType<String>().where((part) => part.isNotEmpty).toSet().join(', ');
+          if (label.isEmpty) label = 'Current location';
+        }
+      }
+      if (mounted) setState(() => currentLocationLabel = label);
+    } catch (error) {
+      if (mounted) setState(() => currentLocationLabel = 'Location unavailable · tap to retry');
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
+    } finally {
+      if (mounted) setState(() => locationLoading = false);
+    }
+  }
+
+  void handlePhoneBack() {
+    if (selectedBarber != null) {
+      setState(() => selectedBarber = null);
+    } else if (tab != 0) {
+      setState(() => tab = 0);
+    }
   }
 
   Future<void> bookingAction(String id, String action) async {
@@ -577,8 +642,13 @@ class _BookingShellState extends State<BookingShell> {
                 NavigationDestination(icon: Icon(Icons.storefront_outlined), selectedIcon: Icon(Icons.storefront), label: 'Barbers'),
                 NavigationDestination(icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long), label: 'Bookings'),
               ];
-    return Scaffold(
-      appBar: AppBar(title: Row(children: [
+    return PopScope(
+      canPop: selectedBarber == null && tab == 0,
+      onPopInvokedWithResult: (didPop, result) { if (!didPop) handlePhoneBack(); },
+      child: Scaffold(
+      appBar: AppBar(automaticallyImplyLeading: false,
+        leading: selectedBarber != null || tab != 0 ? IconButton(tooltip: 'Back', onPressed: handlePhoneBack, icon: const Icon(Icons.arrow_back_rounded)) : null,
+        title: Row(children: [
         Container(width: 34, height: 34, decoration: BoxDecoration(color: ink, borderRadius: BorderRadius.circular(11)),
           child: const Icon(Icons.content_cut_rounded, color: gold, size: 19)),
         const SizedBox(width: 10), Text(mode == 0 ? 'BarberBook' : mode == 1 ? 'Barber Portal' : 'Admin Panel', style: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: -.4)),
@@ -596,7 +666,7 @@ class _BookingShellState extends State<BookingShell> {
       bottomNavigationBar: NavigationBar(height: 70, selectedIndex: tab, onDestinationSelected: (i) => setState(() => tab = i),
         backgroundColor: Colors.white, indicatorColor: gold.withValues(alpha: .18),
         destinations: destinations),
-    );
+    ));
   }
 
   Widget authPage() => Scaffold(backgroundColor: paper, body: SafeArea(child: Center(child: SingleChildScrollView(padding: const EdgeInsets.all(22), child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 440), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -625,7 +695,6 @@ class _BookingShellState extends State<BookingShell> {
       }, style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: ink, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)), textStyle: const TextStyle(fontWeight: FontWeight.w800)), child: Text(creatingAccount ? 'CREATE ACCOUNT' : 'LOG IN'))),
       const SizedBox(height: 7), Center(child: TextButton(onPressed: () { if (!creatingAccount || authRole != 2) setState(() => creatingAccount = !creatingAccount); }, child: Text(creatingAccount ? 'Already have an account? Log in' : authRole == 2 ? 'Admin accounts are created by the system' : 'Don’t have an account? Create one', style: const TextStyle(fontSize: 11, color: ink)))),
     ]))),
-    const SizedBox(height: 13), Container(padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: gold.withValues(alpha: .15), borderRadius: BorderRadius.circular(13)), child: const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [Icon(Icons.info_outline_rounded, color: Color(0xFFAD7720), size: 17), SizedBox(width: 8), Expanded(child: Text('Admin login: admin@barberbook.com. On first setup, use the password set with ADMIN_PASSWORD or the one-time password printed by the API.', style: TextStyle(fontSize: 10, height: 1.4, color: ink)))])),
   ]))))));
 
   Widget authRoleCard(int role, IconData icon, String label) => Expanded(child: InkWell(onTap: () => setState(() => authRole = role), borderRadius: BorderRadius.circular(13), child: Container(padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 4), decoration: BoxDecoration(color: authRole == role ? ink : Colors.white, borderRadius: BorderRadius.circular(13), border: Border.all(color: authRole == role ? ink : const Color(0xFFE8E4DC))), child: Column(children: [Icon(icon, size: 20, color: authRole == role ? gold : muted), const SizedBox(height: 5), Text(label, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: authRole == role ? Colors.white : ink))]))));
@@ -635,7 +704,7 @@ class _BookingShellState extends State<BookingShell> {
   Widget homePage() => selectedBarber != null ? bookingFlow() : SingleChildScrollView(padding: const EdgeInsets.fromLTRB(20, 8, 20, 28), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
     Row(children: [Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text('Good morning, ${currentUser?['name'] ?? 'there'} 👋', style: TextStyle(color: muted, fontSize: 13)),
-      const SizedBox(height: 4), const Row(children: [Icon(Icons.location_on_outlined, size: 16, color: gold), SizedBox(width: 3), Text('Muzaffarpur, Bihar', style: TextStyle(fontWeight: FontWeight.w700))]),
+      const SizedBox(height: 4), InkWell(onTap: refreshCurrentLocation, borderRadius: BorderRadius.circular(8), child: Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(children: [if (locationLoading) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: gold)) else const Icon(Icons.location_on_outlined, size: 16, color: gold), const SizedBox(width: 3), Flexible(child: Text(currentLocationLabel, style: const TextStyle(fontWeight: FontWeight.w700), overflow: TextOverflow.ellipsis)), const SizedBox(width: 3), const Icon(Icons.refresh_rounded, size: 14, color: muted)]))),
     ])), CircleAvatar(backgroundColor: const Color(0xFFF1E6D0), child: const Text('P', style: TextStyle(color: ink, fontWeight: FontWeight.bold)))]),
     const SizedBox(height: 22),
     InkWell(onTap: () => FocusScope.of(context).requestFocus(searchFocusNode), borderRadius: BorderRadius.circular(22), child: Container(height: 176, width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(
