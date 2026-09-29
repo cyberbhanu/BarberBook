@@ -1,5 +1,9 @@
+import 'dart:async';
+
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'api_service.dart';
+import 'booking_export.dart';
 
 void main() => runApp(const BarberBookApp());
 
@@ -59,12 +63,16 @@ class BookingShell extends StatefulWidget {
 
 class _BookingShellState extends State<BookingShell> {
   final api = BarberBookApi();
+  Timer? _adminRefreshTimer;
+  bool _refreshing = false;
   bool signedIn = false;
   bool creatingAccount = false;
   bool acceptedTerms = false;
   int authRole = 0;
   int tab = 0;
   int bookingTab = 0;
+  int adminBookingRange = 0; // 0 all, 1 daily, 2 monthly
+  DateTime adminBookingDate = DateTime.now();
   int mode = 0; // 0: customer, 1: barber, 2: admin
   bool requestAccepted = false;
   Barber? selectedBarber;
@@ -91,6 +99,28 @@ class _BookingShellState extends State<BookingShell> {
   List<dynamic> customerReviews = [];
   Set<String> favoriteBarberIds = {};
   Map<String, dynamic> adminStats = {};
+  @override
+  void initState() {
+    super.initState();
+    // Poll the API while an admin is signed in so bookings from customers
+    // and barbers show up without requiring a manual reload.
+    _adminRefreshTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      if (mounted && signedIn && mode == 2) refreshData(silent: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _adminRefreshTimer?.cancel();
+    searchFocusNode.dispose();
+    search.dispose();
+    emailController.dispose();
+    passwordController.dispose();
+    nameController.dispose();
+    phoneController.dispose();
+    shopController.dispose();
+    super.dispose();
+  }
   List<Map<String, dynamic>> get availableServices {
     if (selectedBarber == null) return [];
     final profiles = remoteBarbers.whereType<Map>().where((b) => b['id'] == selectedBarber!.id).toList();
@@ -165,7 +195,9 @@ class _BookingShellState extends State<BookingShell> {
     }
   }
 
-  Future<void> refreshData() async {
+  Future<void> refreshData({bool silent = false}) async {
+    if (_refreshing) return;
+    _refreshing = true;
     try {
       if (mode == 2) {
         final results = await Future.wait([api.get('/admin/barbers'), api.get('/bookings'), api.get('/admin/overview')]);
@@ -188,7 +220,9 @@ class _BookingShellState extends State<BookingShell> {
         });
       }
     } catch (error) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
+      if (mounted && !silent) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
+    } finally {
+      _refreshing = false;
     }
   }
 
@@ -205,6 +239,96 @@ class _BookingShellState extends State<BookingShell> {
   Future<void> reviewBarber(String id, String decision) async {
     try { await api.post('/admin/barbers/$id/$decision', {}); await refreshData(); }
     catch (error) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', '')))); }
+  }
+
+  Future<void> editManagedBarber(Map<String, dynamic> barber) async {
+    final ownerName = TextEditingController(text: barber['ownerName'] as String? ?? '');
+    final shop = TextEditingController(text: barber['shop'] as String? ?? '');
+    final email = TextEditingController(text: barber['email'] as String? ?? '');
+    final phone = TextEditingController(text: barber['phone'] as String? ?? '');
+    final address = TextEditingController(text: barber['address'] as String? ?? '');
+    final formKey = GlobalKey<FormState>();
+    final changes = await showDialog<Map<String, String>?>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Edit barber details'),
+        content: SizedBox(width: 440, child: SingleChildScrollView(child: Form(
+          key: formKey,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextFormField(controller: ownerName, decoration: const InputDecoration(labelText: 'Barber name'), validator: (v) => v == null || v.trim().isEmpty ? 'Enter a name' : null),
+            TextFormField(controller: shop, decoration: const InputDecoration(labelText: 'Shop name'), validator: (v) => v == null || v.trim().isEmpty ? 'Enter a shop name' : null),
+            TextFormField(controller: email, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Login email'), validator: (v) => v == null || !v.contains('@') ? 'Enter a valid email' : null),
+            TextFormField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Phone number')),
+            TextFormField(controller: address, decoration: const InputDecoration(labelText: 'Shop address')),
+          ]),
+        ))),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+          FilledButton(onPressed: () {
+            if (formKey.currentState?.validate() ?? false) {
+              Navigator.pop(dialogContext, {'ownerName': ownerName.text.trim(), 'shop': shop.text.trim(), 'email': email.text.trim(), 'phone': phone.text.trim(), 'address': address.text.trim()});
+            }
+          }, child: const Text('Save changes')),
+        ],
+      ),
+    );
+    ownerName.dispose(); shop.dispose(); email.dispose(); phone.dispose(); address.dispose();
+    if (changes == null) return;
+    try {
+      await api.patch('/admin/barbers/${barber['id']}', changes);
+      await refreshData();
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Barber details updated.')));
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  List<Map<String, dynamic>> get filteredAdminBookings {
+    final rows = remoteBookings.whereType<Map>().map((row) => Map<String, dynamic>.from(row)).toList();
+    final day = '${adminBookingDate.year}-${adminBookingDate.month.toString().padLeft(2, '0')}-${adminBookingDate.day.toString().padLeft(2, '0')}';
+    final month = '${adminBookingDate.year}-${adminBookingDate.month.toString().padLeft(2, '0')}';
+    final filtered = rows.where((booking) {
+      final date = booking['date'] as String? ?? '';
+      if (adminBookingRange == 1) return date == day;
+      if (adminBookingRange == 2) return date.startsWith(month);
+      return true;
+    }).toList();
+    filtered.sort((a, b) => '${b['date']} ${b['time']}'.compareTo('${a['date']} ${a['time']}'));
+    return filtered;
+  }
+
+  Future<void> chooseAdminBookingDate() async {
+    final date = await showDatePicker(context: context, initialDate: adminBookingDate, firstDate: DateTime(2020), lastDate: DateTime(2100), helpText: adminBookingRange == 2 ? 'Choose a date in the month' : 'Choose booking date');
+    if (date != null) setState(() => adminBookingDate = date);
+  }
+
+  String _csvCell(Object? value) => '"${(value?.toString() ?? '').replaceAll('"', '""')}"';
+
+  Future<void> exportAdminBookings() async {
+    final rows = filteredAdminBookings;
+    if (rows.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('There are no bookings in this date range to export.')));
+      return;
+    }
+    final csv = StringBuffer('Booking ID,Reference,Date,Time,Status,Customer,Customer Email,Customer Phone,Barber,Shop,Barber Phone,Service,Duration (minutes),Amount\r\n');
+    for (final booking in rows) {
+      final customer = booking['customer'] is Map ? Map<String, dynamic>.from(booking['customer'] as Map) : <String, dynamic>{};
+      final barber = booking['barber'] is Map ? Map<String, dynamic>.from(booking['barber'] as Map) : <String, dynamic>{};
+      final values = [booking['id'], booking['reference'], booking['date'], booking['time'], booking['status'], customer['name'], customer['email'], customer['phone'], barber['ownerName'], barber['shop'], barber['phone'], booking['service'], booking['duration'], booking['total']];
+      csv.writeln(values.map(_csvCell).join(','));
+    }
+    final suffix = adminBookingRange == 1
+        ? '${adminBookingDate.year}-${adminBookingDate.month.toString().padLeft(2, '0')}-${adminBookingDate.day.toString().padLeft(2, '0')}'
+        : adminBookingRange == 2
+            ? '${adminBookingDate.year}-${adminBookingDate.month.toString().padLeft(2, '0')}'
+            : 'all';
+    try {
+      final downloaded = await downloadBookingCsv(csv.toString(), 'barberbook-bookings-$suffix.csv');
+      if (!downloaded) await Clipboard.setData(ClipboardData(text: csv.toString()));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(downloaded ? 'Booking CSV downloaded (${rows.length} bookings).' : 'Booking CSV copied to clipboard (${rows.length} bookings).')));
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not export bookings: $error')));
+    }
   }
 
   Future<void> createBarberAccount() async {
@@ -612,7 +736,10 @@ class _BookingShellState extends State<BookingShell> {
     return Container(margin: const EdgeInsets.only(bottom: 11), padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [CircleAvatar(backgroundColor: const Color(0xFF34504C), child: Text((barberData['ownerName'] as String? ?? 'B').split(' ').map((s) => s.isEmpty ? '' : s[0]).take(2).join().toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))), const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(barberData['shop'] as String? ?? 'Barber shop', style: const TextStyle(fontWeight: FontWeight.w800)), if (mode != 1) Text(barberData['ownerName'] as String? ?? '', style: TextStyle(color: muted, fontSize: 12)), if (mode == 1) Text(booking['customer'] is Map ? (booking['customer']['name'] as String? ?? '') : '', style: TextStyle(color: muted, fontSize: 12))])), Container(padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5), decoration: BoxDecoration(color: statusColor.withValues(alpha: .12), borderRadius: BorderRadius.circular(20)), child: Text(status.toUpperCase(), style: TextStyle(color: statusColor, fontSize: 9, fontWeight: FontWeight.bold)))]),
       const Divider(height: 25), detailRow(Icons.calendar_month_outlined, '${booking['date']}  ·  ${booking['time']}'), detailRow(Icons.content_cut_rounded, '${booking['service']}  ·  ₹${booking['total']}'),
-      if (mode == 2 && booking['customer'] is Map) detailRow(Icons.person_outline_rounded, 'Customer: ${booking['customer']['name']} · ${booking['customer']['email']}'),
+      if (mode == 2 && booking['customer'] is Map) ...[
+        detailRow(Icons.person_outline_rounded, 'Customer: ${booking['customer']['name']}'),
+        detailRow(Icons.alternate_email_rounded, '${booking['customer']['email'] ?? ''} · ${booking['customer']['phone'] ?? ''}'),
+      ],
       if (canCancel) SizedBox(width: double.infinity, child: OutlinedButton(onPressed: () => bookingAction(booking['id'] as String, 'cancel'), child: const Text('Cancel appointment'))),
       if (canReview) SizedBox(width: double.infinity, child: OutlinedButton.icon(onPressed: () => writeReview(booking), icon: const Icon(Icons.star_outline_rounded), label: const Text('Write a review'))),
       if (mode == 1 && status == 'pending') Row(children: [Expanded(child: OutlinedButton(onPressed: () => bookingAction(booking['id'] as String, 'reject'), child: const Text('Decline'))), const SizedBox(width: 8), Expanded(child: FilledButton(onPressed: () => bookingAction(booking['id'] as String, 'accept'), style: FilledButton.styleFrom(backgroundColor: const Color(0xFF258246)), child: const Text('Accept')))]),
@@ -674,16 +801,32 @@ class _BookingShellState extends State<BookingShell> {
       final pending = status == 'pending';
       final color = status == 'approved' ? const Color(0xFF258246) : status == 'pending' ? const Color(0xFFAD7720) : const Color(0xFFB74B3B);
       return Container(margin: const EdgeInsets.only(bottom: 9), padding: const EdgeInsets.all(13), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [CircleAvatar(backgroundColor: const Color(0xFF34504C), child: Text((barber['ownerName'] as String? ?? 'B').split(' ').map((s) => s.isEmpty ? '' : s[0]).take(2).join().toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))), const SizedBox(width: 11), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(barber['shop'] as String? ?? 'Shop', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13)), Text('${barber['ownerName']} · ${barber['phone'] ?? ''}', style: TextStyle(color: muted, fontSize: 11))])), Text(status.toUpperCase(), style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 9))]),
+        Row(children: [CircleAvatar(backgroundColor: const Color(0xFF34504C), child: Text((barber['ownerName'] as String? ?? 'B').split(' ').map((s) => s.isEmpty ? '' : s[0]).take(2).join().toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))), const SizedBox(width: 11), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(barber['shop'] as String? ?? 'Shop', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13)), Text('${barber['ownerName']} · ${barber['phone'] ?? ''}', style: TextStyle(color: muted, fontSize: 11))])), IconButton(tooltip: 'Edit barber details', onPressed: () => editManagedBarber(barber), icon: const Icon(Icons.edit_outlined, size: 19, color: ink)), Text(status.toUpperCase(), style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 9))]),
         if (pending) ...[const SizedBox(height: 11), Row(children: [Expanded(child: OutlinedButton(onPressed: () => reviewBarber(barber['id'] as String, 'reject'), style: OutlinedButton.styleFrom(foregroundColor: const Color(0xFFB74B3B)), child: const Text('Reject'))), const SizedBox(width: 8), Expanded(child: FilledButton(onPressed: () => reviewBarber(barber['id'] as String, 'approve'), style: FilledButton.styleFrom(backgroundColor: const Color(0xFF258246)), child: const Text('Approve & enable login')))])],
       ]));
     }),
   ]);
 
   Widget adminBookings() => ListView(padding: const EdgeInsets.all(20), children: [
-    const Text('Booking management', style: TextStyle(fontSize: 23, fontWeight: FontWeight.w800)), const SizedBox(height: 4), Text('Monitor appointments across the platform.', style: TextStyle(color: muted, fontSize: 12)), const SizedBox(height: 16),
-    Row(children: [Expanded(child: metricCard('Today', '86', Icons.today_outlined, const Color(0xFFE7F0FA))), const SizedBox(width: 10), Expanded(child: metricCard('This month', '1,250', Icons.date_range_outlined, const Color(0xFFE5F4E9)))]), const SizedBox(height: 16),
-    if (remoteBookings.isEmpty) Text('No bookings yet.', style: TextStyle(color: muted, fontSize: 12)) else ...remoteBookings.whereType<Map>().map((b) => bookingCard(Map<String, dynamic>.from(b))),
+    Row(children: [const Expanded(child: Text('Booking management', style: TextStyle(fontSize: 23, fontWeight: FontWeight.w800))), IconButton(tooltip: 'Refresh bookings', onPressed: refreshData, icon: const Icon(Icons.refresh_rounded))]),
+    const SizedBox(height: 4), Text('Every barber’s customer appointments · live updates about every 8 seconds.', style: TextStyle(color: muted, fontSize: 12)), const SizedBox(height: 16),
+    Row(children: [Expanded(child: metricCard('Today', '${remoteBookings.whereType<Map>().where((b) => b['date'] == DateTime.now().toIso8601String().substring(0, 10)).length}', Icons.today_outlined, const Color(0xFFE7F0FA))), const SizedBox(width: 10), Expanded(child: metricCard('This month', '${remoteBookings.whereType<Map>().where((b) => (b['date'] as String? ?? '').startsWith('${DateTime.now().year}-${DateTime.now().month.toString().padLeft(2, '0')}')).length}', Icons.date_range_outlined, const Color(0xFFE5F4E9)))]), const SizedBox(height: 16),
+    const Text('Filter bookings', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15)), const SizedBox(height: 8),
+    Wrap(spacing: 8, runSpacing: 4, children: [
+      ChoiceChip(label: const Text('All'), selected: adminBookingRange == 0, onSelected: (_) => setState(() => adminBookingRange = 0)),
+      ChoiceChip(label: const Text('Daily'), selected: adminBookingRange == 1, onSelected: (_) => setState(() => adminBookingRange = 1)),
+      ChoiceChip(label: const Text('Monthly'), selected: adminBookingRange == 2, onSelected: (_) => setState(() => adminBookingRange = 2)),
+    ]),
+    if (adminBookingRange != 0) ...[
+      const SizedBox(height: 6),
+      OutlinedButton.icon(onPressed: chooseAdminBookingDate, icon: const Icon(Icons.calendar_month_outlined), label: Text(adminBookingRange == 1 ? 'Date: ${adminBookingDate.year}-${adminBookingDate.month.toString().padLeft(2, '0')}-${adminBookingDate.day.toString().padLeft(2, '0')}' : 'Month: ${adminBookingDate.year}-${adminBookingDate.month.toString().padLeft(2, '0')}')),
+    ],
+    const SizedBox(height: 8),
+    SizedBox(height: 46, child: FilledButton.icon(onPressed: exportAdminBookings, style: FilledButton.styleFrom(backgroundColor: ink), icon: const Icon(Icons.file_download_outlined), label: const Text('Export booking details as CSV'))),
+    const SizedBox(height: 18),
+    Text('Bookings (${filteredAdminBookings.length})', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)), const SizedBox(height: 9),
+    if (filteredAdminBookings.isEmpty) Padding(padding: const EdgeInsets.symmetric(vertical: 25), child: Text(remoteBookings.isEmpty ? 'No bookings yet.' : 'No bookings match this date range.', style: TextStyle(color: muted, fontSize: 12)))
+    else ...filteredAdminBookings.map(bookingCard),
   ]);
 
   Widget metricCard(String label, String value, IconData icon, Color tint) => Container(padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Container(width: 33, height: 33, decoration: BoxDecoration(color: tint, borderRadius: BorderRadius.circular(10)), child: Icon(icon, size: 17, color: ink)), const SizedBox(height: 11), Text(value, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 20)), const SizedBox(height: 2), Text(label, style: TextStyle(color: muted, fontSize: 10))]));

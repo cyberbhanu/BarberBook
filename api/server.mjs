@@ -156,7 +156,7 @@ async function route(req, res) {
   }
   if (path === '/admin/barbers' && req.method === 'GET') {
     requireAuth(req, ['admin']);
-    return json(res, 200, { barbers: db.barbers.map(publicBarber) });
+    return json(res, 200, { barbers: db.barbers.map((barber) => ({ ...publicBarber(barber), email: db.users.find((user) => user.id === barber.ownerId)?.email ?? '' })) });
   }
   if (path === '/admin/barbers' && req.method === 'POST') {
     requireAuth(req, ['admin']);
@@ -170,6 +170,27 @@ async function route(req, res) {
     const barber = createBarberProfile(user, input, 'approved');
     await save();
     return json(res, 201, { user: safeUser(user), barber: publicBarber(barber) });
+  }
+  const barberEdit = path.match(/^\/admin\/barbers\/([^/]+)$/);
+  if (barberEdit && req.method === 'PATCH') {
+    requireAuth(req, ['admin']);
+    const barber = db.barbers.find((item) => item.id === barberEdit[1]);
+    if (!barber) throw Object.assign(new Error('Barber not found.'), { status: 404 });
+    const owner = db.users.find((item) => item.id === barber.ownerId);
+    if (!owner) throw Object.assign(new Error('Barber account not found.'), { status: 404 });
+    if (input.ownerName != null) owner.name = required(input.ownerName, 'Barber name');
+    if (input.shop != null) barber.shop = required(input.shop, 'Shop name');
+    if (input.phone != null) owner.phone = String(input.phone).trim();
+    if (input.address != null) barber.address = String(input.address).trim();
+    if (input.email != null) {
+      const email = required(input.email, 'Email').toLowerCase();
+      if (!/^\S+@\S+\.\S+$/.test(email)) throw Object.assign(new Error('Enter a valid email address.'), { status: 400 });
+      const duplicate = userByEmail(email);
+      if (duplicate && duplicate.id !== owner.id) throw Object.assign(new Error('An account with this email already exists.'), { status: 409 });
+      owner.email = email;
+    }
+    await save();
+    return json(res, 200, { barber: publicBarber(barber) });
   }
   const review = path.match(/^\/admin\/barbers\/([^/]+)\/(approve|reject)$/);
   if (review && req.method === 'POST') {
