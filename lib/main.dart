@@ -68,8 +68,10 @@ class _BookingShellState extends State<BookingShell> {
   int mode = 0; // 0: customer, 1: barber, 2: admin
   bool requestAccepted = false;
   Barber? selectedBarber;
+  String? selectedServiceFilter;
   String selectedService = 'Haircut';
   String selectedTime = '10:00 AM';
+  final FocusNode searchFocusNode = FocusNode();
   DateTime selectedDate = DateTime.now();
   bool booked = false;
   final search = TextEditingController();
@@ -86,6 +88,8 @@ class _BookingShellState extends State<BookingShell> {
   List<dynamic> remoteBookings = [];
   List<dynamic> managedBarbers = [];
   List<dynamic> barberServicesRemote = [];
+  List<dynamic> customerReviews = [];
+  Set<String> favoriteBarberIds = {};
   Map<String, dynamic> adminStats = {};
   List<Map<String, dynamic>> get availableServices {
     if (selectedBarber == null) return [];
@@ -172,9 +176,16 @@ class _BookingShellState extends State<BookingShell> {
         if (!mounted) return;
         setState(() { currentUser = Map<String, dynamic>.from(results[0]['user'] as Map); currentBarber = results[0]['barber'] == null ? null : Map<String, dynamic>.from(results[0]['barber'] as Map); remoteBookings = results[1]['bookings'] as List<dynamic>; barberServicesRemote = results[2]['services'] as List<dynamic>; });
       } else {
-        final results = await Future.wait([api.get('/barbers'), api.get('/bookings')]);
+        final results = await Future.wait([api.get('/me'), api.get('/barbers'), api.get('/bookings'), api.get('/reviews')]);
         if (!mounted) return;
-        setState(() { remoteBarbers = results[0]['barbers'] as List<dynamic>; remoteBookings = results[1]['bookings'] as List<dynamic>; });
+        final profile = Map<String, dynamic>.from(results[0]['user'] as Map);
+        setState(() {
+          currentUser = profile;
+          favoriteBarberIds = (profile['favoriteBarberIds'] as List<dynamic>? ?? []).whereType<String>().toSet();
+          remoteBarbers = results[1]['barbers'] as List<dynamic>;
+          remoteBookings = results[2]['bookings'] as List<dynamic>;
+          customerReviews = results[3]['reviews'] as List<dynamic>;
+        });
       }
     } catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
@@ -248,6 +259,146 @@ class _BookingShellState extends State<BookingShell> {
     if (result == null) return;
     try { await api.post('/auth/change-password', result); if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Password updated.'))); }
     catch (error) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', '')))); }
+  }
+
+  Future<void> editProfileDialog() async {
+    final name = TextEditingController(text: currentUser?['name'] as String? ?? '');
+    final phone = TextEditingController(text: currentUser?['phone'] as String? ?? '');
+    final form = GlobalKey<FormState>();
+    final data = await showDialog<Map<String, String>?>(context: context, builder: (dialogContext) => AlertDialog(
+      title: const Text('Edit profile'),
+      content: Form(key: form, child: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextFormField(controller: name, decoration: const InputDecoration(labelText: 'Full name'), validator: (value) => value == null || value.trim().isEmpty ? 'Enter your name' : null),
+        TextFormField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Phone number')),
+        TextFormField(initialValue: currentUser?['email'] as String? ?? '', enabled: false, decoration: const InputDecoration(labelText: 'Email')),
+      ])),
+      actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+        FilledButton(onPressed: () { if (form.currentState?.validate() ?? false) Navigator.pop(dialogContext, {'name': name.text.trim(), 'phone': phone.text.trim()}); }, child: const Text('Save'))],
+    ));
+    if (data == null) return;
+    try {
+      final result = await api.patch('/me', data);
+      if (!mounted) return;
+      setState(() => currentUser = Map<String, dynamic>.from(result['user'] as Map));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profile updated.')));
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  Future<void> toggleFavorite(Barber barber) async {
+    final next = Set<String>.from(favoriteBarberIds);
+    if (!next.add(barber.id)) next.remove(barber.id);
+    try {
+      final result = await api.patch('/me', {'favoriteBarberIds': next.toList()});
+      if (!mounted) return;
+      final profile = Map<String, dynamic>.from(result['user'] as Map);
+      setState(() {
+        currentUser = profile;
+        favoriteBarberIds = (profile['favoriteBarberIds'] as List<dynamic>? ?? []).whereType<String>().toSet();
+      });
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
+    }
+  }
+
+  Future<void> showInfo(String title, String message) => showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+    title: Text(title), content: Text(message), actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Done'))],
+  ));
+
+  Future<void> openProfileAction(String title) async {
+    switch (title) {
+      case 'My bookings':
+        setState(() => tab = 1);
+        break;
+      case 'Favourites':
+        await showFavourites();
+        break;
+      case 'Payment methods':
+        await showInfo('Payment methods', 'Online payments are not connected yet. Pay your barber at the shop after your appointment.');
+        break;
+      case 'Reviews':
+        await showReviews();
+        break;
+      case 'Notifications':
+        await showNotifications();
+        break;
+      case 'Help & support':
+        await showInfo('Help & support', 'To book, choose a barber and service, select an open date and time, then confirm. Your appointment will appear under My bookings. For account access, contact your BarberBook administrator.');
+        break;
+      case 'Terms & privacy':
+        await showInfo('Terms & privacy', 'BarberBook stores your account and appointment details on its configured service. Share only accurate contact information. Cancellations and shop availability are handled by the barber.');
+        break;
+    }
+  }
+
+  Future<void> showFavourites() async {
+    await showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+      title: const Text('Favourite barbers'),
+      content: SizedBox(width: 420, child: favoriteBarberIds.isEmpty
+          ? const Text('You have not saved a barber yet. Use the heart on a barber card to add one.')
+          : ListView(shrinkWrap: true, children: remoteBarbers.whereType<Map>().where((row) => favoriteBarberIds.contains(row['id'])).map((row) {
+              final barber = barberFromMap(Map<String, dynamic>.from(row));
+              return ListTile(title: Text(barber.shop), subtitle: Text(barber.name), leading: const Icon(Icons.favorite, color: Color(0xFFB74B3B)),
+                trailing: IconButton(tooltip: 'Book ${barber.shop}', icon: const Icon(Icons.calendar_month_outlined), onPressed: () { Navigator.pop(dialogContext); setState(() => tab = 0); startBooking(barber); }));
+            }).toList())),
+      actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Close'))],
+    ));
+  }
+
+  Future<void> showNotifications() async {
+    final notices = remoteBookings.whereType<Map>().toList();
+    await showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+      title: const Text('Notifications'),
+      content: SizedBox(width: 420, child: notices.isEmpty
+          ? const Text('No appointment notifications yet. New booking updates will appear here.')
+          : ListView(shrinkWrap: true, children: notices.map((row) {
+              final booking = Map<String, dynamic>.from(row);
+              final barber = booking['barber'] is Map ? Map<String, dynamic>.from(booking['barber'] as Map) : <String, dynamic>{};
+              final status = (booking['status'] as String? ?? 'pending').toUpperCase();
+              return ListTile(leading: const Icon(Icons.notifications_active_outlined, color: Color(0xFFAD7A29)),
+                title: Text('Appointment $status'), subtitle: Text('${barber['shop'] ?? 'Barber shop'} · ${booking['date']} at ${booking['time']}'));
+            }).toList())),
+      actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Done'))],
+    ));
+  }
+
+  Future<void> showReviews() async {
+    final pending = remoteBookings.whereType<Map>().where((booking) => booking['status'] == 'completed' &&
+      !customerReviews.whereType<Map>().any((review) => review['bookingId'] == booking['id'])).toList();
+    await showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+      title: const Text('My reviews'),
+      content: SizedBox(width: 420, child: ListView(shrinkWrap: true, children: [
+        ...customerReviews.whereType<Map>().map((review) => ListTile(leading: const Icon(Icons.star, color: gold),
+          title: Text('${review['rating']} stars'), subtitle: Text((review['comment'] as String?)?.isNotEmpty == true ? review['comment'] as String : 'Your appointment review'))),
+        ...pending.map((booking) => ListTile(title: Text('Review ${booking['service']}'), subtitle: Text('${booking['date']} · ${booking['time']}'),
+          trailing: TextButton(onPressed: () { Navigator.pop(dialogContext); writeReview(Map<String, dynamic>.from(booking)); }, child: const Text('Write')))),
+        if (customerReviews.isEmpty && pending.isEmpty) const Padding(padding: EdgeInsets.all(12), child: Text('Reviews become available after a barber completes your appointment.')),
+      ])),
+      actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Close'))],
+    ));
+  }
+
+  Future<void> writeReview(Map<String, dynamic> booking) async {
+    var rating = 5;
+    final comment = TextEditingController();
+    final data = await showDialog<Map<String, dynamic>?>(context: context, builder: (dialogContext) => StatefulBuilder(builder: (context, updateDialog) => AlertDialog(
+      title: const Text('Rate your appointment'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        Wrap(spacing: 2, children: List.generate(5, (index) => IconButton(tooltip: '${index + 1} stars', onPressed: () => updateDialog(() => rating = index + 1), icon: Icon(index < rating ? Icons.star : Icons.star_border, color: gold)))),
+        TextField(controller: comment, maxLines: 3, maxLength: 1000, decoration: const InputDecoration(labelText: 'Review (optional)', border: OutlineInputBorder())),
+      ]),
+      actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(dialogContext, {'bookingId': booking['id'], 'rating': rating, 'comment': comment.text.trim()}), child: const Text('Submit review'))],
+    )));
+    if (data == null) return;
+    try {
+      await api.post('/reviews', data);
+      await refreshData();
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Thanks for your review.')));
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
+    }
   }
 
   Barber barberFromMap(Map<String, dynamic> value) {
@@ -344,7 +495,7 @@ class _BookingShellState extends State<BookingShell> {
         authInput(emailController, 'Email', Icons.mail_outline_rounded, keyboard: TextInputType.emailAddress, validator: (v) => (v == null || !v.contains('@')) ? 'Enter a valid email address' : null), const SizedBox(height: 11),
         authInput(passwordController, 'Password (at least 8 characters)', Icons.lock_outline_rounded, obscure: true, validator: (v) => (v == null || v.length < 8) ? 'Use at least 8 characters' : null),
       if (creatingAccount) ...[const SizedBox(height: 8), CheckboxListTile(contentPadding: EdgeInsets.zero, dense: true, value: acceptedTerms, onChanged: (v) => setState(() => acceptedTerms = v ?? false), controlAffinity: ListTileControlAffinity.leading, title: const Text('I agree to the Terms & Conditions', style: TextStyle(fontSize: 11)))],
-      if (!creatingAccount) Align(alignment: Alignment.centerRight, child: TextButton(onPressed: () => ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Password recovery requires a connected authentication provider.'))), child: const Text('Forgot password?', style: TextStyle(color: Color(0xFFAD7720), fontSize: 11)))),
+      if (!creatingAccount) Align(alignment: Alignment.centerRight, child: TextButton(onPressed: () => showInfo('Password help', 'Password reset by email is not configured. If you are signed in on another device, use Change password. Otherwise ask your BarberBook administrator for help.'), child: const Text('Forgot password?', style: TextStyle(color: Color(0xFFAD7720), fontSize: 11)))),
       const SizedBox(height: 4), SizedBox(width: double.infinity, height: 48, child: FilledButton(onPressed: () {
         submitAuth();
       }, style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: ink, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)), textStyle: const TextStyle(fontWeight: FontWeight.w800)), child: Text(creatingAccount ? 'CREATE ACCOUNT' : 'LOG IN'))),
@@ -363,7 +514,7 @@ class _BookingShellState extends State<BookingShell> {
       const SizedBox(height: 4), const Row(children: [Icon(Icons.location_on_outlined, size: 16, color: gold), SizedBox(width: 3), Text('Muzaffarpur, Bihar', style: TextStyle(fontWeight: FontWeight.w700))]),
     ])), CircleAvatar(backgroundColor: const Color(0xFFF1E6D0), child: const Text('P', style: TextStyle(color: ink, fontWeight: FontWeight.bold)))]),
     const SizedBox(height: 22),
-    Container(height: 176, width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(
+    InkWell(onTap: () => FocusScope.of(context).requestFocus(searchFocusNode), borderRadius: BorderRadius.circular(22), child: Container(height: 176, width: double.infinity, padding: const EdgeInsets.all(20), decoration: BoxDecoration(
       color: ink, borderRadius: BorderRadius.circular(22),
       gradient: const LinearGradient(colors: [Color(0xFF101B20), Color(0xFF24403A)], begin: Alignment.topLeft, end: Alignment.bottomRight)),
       child: Stack(children: [
@@ -373,16 +524,26 @@ class _BookingShellState extends State<BookingShell> {
           const Spacer(), const Text('A fresh cut,\njust around the corner.', style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w800, height: 1.2)),
           const SizedBox(height: 10), Row(children: [const Text('Find your barber', style: TextStyle(color: Colors.white70, fontSize: 12)), const SizedBox(width: 5), Icon(Icons.arrow_forward_rounded, color: gold, size: 16)])
         ])
-      ])),
+      ]))),
     const SizedBox(height: 22),
-    TextField(controller: search, onChanged: (_) => setState(() {}), decoration: InputDecoration(hintText: 'Search barbers, services…', prefixIcon: const Icon(Icons.search_rounded), filled: true, fillColor: Colors.white, contentPadding: EdgeInsets.zero, border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none))),
-    const SizedBox(height: 23), sectionTitle('Explore services', 'See all'), const SizedBox(height: 12),
+    TextField(focusNode: searchFocusNode, controller: search, onChanged: (_) => setState(() {}), decoration: InputDecoration(hintText: 'Search barbers, services…', prefixIcon: const Icon(Icons.search_rounded), filled: true, fillColor: Colors.white, contentPadding: EdgeInsets.zero, border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none))),
+    const SizedBox(height: 23), sectionTitle('Explore services', 'See all', onActionTap: () => setState(() => selectedServiceFilter = null)), const SizedBox(height: 12),
     SizedBox(height: 88, child: ListView(scrollDirection: Axis.horizontal, children: [
       serviceChip('Haircut', Icons.person_outline_rounded), serviceChip('Beard', Icons.face_retouching_natural), serviceChip('Hair styling', Icons.auto_awesome_outlined), serviceChip('Facial', Icons.spa_outlined),
     ])),
-    const SizedBox(height: 18), sectionTitle('Nearby barbers', 'View all'), const SizedBox(height: 12),
-    if (remoteBarbers.isEmpty) Padding(padding: const EdgeInsets.symmetric(vertical: 25), child: Center(child: Text('No approved barbers nearby yet. Check back soon.', textAlign: TextAlign.center, style: TextStyle(color: muted, fontSize: 12))))
-    else ...remoteBarbers.whereType<Map>().where((b) => '${b['ownerName']} ${b['shop']}'.toLowerCase().contains(search.text.toLowerCase())).map((b) => barberCard(barberFromMap(Map<String, dynamic>.from(b)))),
+    const SizedBox(height: 18), sectionTitle('Nearby barbers', 'View all', onActionTap: () => setState(() { selectedServiceFilter = null; search.clear(); })), const SizedBox(height: 12),
+    if (remoteBarbers.isEmpty) Padding(padding: const EdgeInsets.symmetric(vertical: 25), child: Center(child: Column(children: [Text('No approved barbers nearby yet. Check back soon.', textAlign: TextAlign.center, style: TextStyle(color: muted, fontSize: 12)), const SizedBox(height: 8), TextButton.icon(onPressed: refreshData, icon: const Icon(Icons.refresh), label: const Text('Refresh barbers'))])))
+    else ...remoteBarbers.whereType<Map>().where((b) {
+      final services = (b['services'] as List<dynamic>? ?? []).whereType<Map>();
+      final query = '${b['ownerName']} ${b['shop']} ${services.map((item) => item['name']).join(' ')}'.toLowerCase();
+      final queryMatches = query.contains(search.text.toLowerCase());
+      final filter = selectedServiceFilter?.toLowerCase();
+      final serviceMatches = filter == null || services.any((service) {
+        final name = (service['name'] as String? ?? '').toLowerCase();
+        return service['enabled'] == true && (name.contains(filter) || (filter == 'hair styling' && name.contains('haircut')));
+      });
+      return queryMatches && serviceMatches;
+    }).map((b) => barberCard(barberFromMap(Map<String, dynamic>.from(b)))),
   ]));
 
   Widget bookingFlow() => SingleChildScrollView(padding: const EdgeInsets.fromLTRB(20, 4, 20, 28), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -420,14 +581,15 @@ class _BookingShellState extends State<BookingShell> {
     const SizedBox(height: 8), Center(child: Text('Appointment request is sent to the barber for confirmation.', textAlign: TextAlign.center, style: TextStyle(color: muted, fontSize: 10))),
   ]));
 
-  Widget sectionTitle(String title, String action) => Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, letterSpacing: -.2)), Text(action, style: const TextStyle(color: Color(0xFFAB7720), fontSize: 12, fontWeight: FontWeight.w700))]);
+  Widget sectionTitle(String title, String action, {required VoidCallback onActionTap}) => Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, letterSpacing: -.2)), TextButton(onPressed: onActionTap, child: Text(action, style: const TextStyle(color: Color(0xFFAB7720), fontSize: 12, fontWeight: FontWeight.w700)))]);
 
-  Widget serviceChip(String title, IconData icon) => Container(width: 78, margin: const EdgeInsets.only(right: 10), padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(icon, color: const Color(0xFFAD7A29), size: 23), const SizedBox(height: 6), Text(title, maxLines: 1, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600))]));
+  Widget serviceChip(String title, IconData icon) => InkWell(onTap: () => setState(() => selectedServiceFilter = selectedServiceFilter == title ? null : title), borderRadius: BorderRadius.circular(16), child: Container(width: 78, margin: const EdgeInsets.only(right: 10), padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: selectedServiceFilter == title ? ink : Colors.white, borderRadius: BorderRadius.circular(16)), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(icon, color: selectedServiceFilter == title ? gold : const Color(0xFFAD7A29), size: 23), const SizedBox(height: 6), Text(title, maxLines: 1, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: selectedServiceFilter == title ? Colors.white : ink))])));
 
   Widget barberCard(Barber barber) => Container(margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18)), child: Row(children: [
     Container(width: 66, height: 72, decoration: BoxDecoration(color: barber.color, borderRadius: BorderRadius.circular(14)), child: Center(child: Text(barber.initials, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20)))),
     const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(barber.shop, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)), const SizedBox(height: 4), Text(barber.name, style: TextStyle(color: muted, fontSize: 11)), const SizedBox(height: 7), Row(children: [const Icon(Icons.star_rounded, color: gold, size: 14), Text(' ${barber.rating}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700)), Text('  ·  ${barber.distance}  ·  ${barber.price}+', style: TextStyle(color: muted, fontSize: 10))])])),
-    const SizedBox(width: 6), FilledButton(onPressed: () => startBooking(barber), style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: ink, padding: const EdgeInsets.symmetric(horizontal: 13), minimumSize: const Size(0, 38), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11))), child: const Text('Book', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12)))
+    IconButton(tooltip: favoriteBarberIds.contains(barber.id) ? 'Remove from favourites' : 'Add to favourites', onPressed: () => toggleFavorite(barber), icon: Icon(favoriteBarberIds.contains(barber.id) ? Icons.favorite : Icons.favorite_border, color: const Color(0xFFB74B3B), size: 20)),
+    const SizedBox(width: 2), FilledButton(onPressed: () => startBooking(barber), style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: ink, padding: const EdgeInsets.symmetric(horizontal: 13), minimumSize: const Size(0, 38), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11))), child: const Text('Book', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12)))
   ]));
 
   Widget bookingsPage() => Padding(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -445,12 +607,14 @@ class _BookingShellState extends State<BookingShell> {
     final barberData = booking['barber'] is Map ? Map<String, dynamic>.from(booking['barber'] as Map) : <String, dynamic>{};
     final status = booking['status'] as String? ?? 'pending';
     final canCancel = mode == 0 && ['pending', 'confirmed'].contains(status);
+    final canReview = mode == 0 && status == 'completed' && !customerReviews.whereType<Map>().any((review) => review['bookingId'] == booking['id']);
     final statusColor = status == 'confirmed' || status == 'completed' ? const Color(0xFF258246) : status == 'pending' ? const Color(0xFFAD7720) : const Color(0xFFB74B3B);
     return Container(margin: const EdgeInsets.only(bottom: 11), padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [CircleAvatar(backgroundColor: const Color(0xFF34504C), child: Text((barberData['ownerName'] as String? ?? 'B').split(' ').map((s) => s.isEmpty ? '' : s[0]).take(2).join().toUpperCase(), style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))), const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(barberData['shop'] as String? ?? 'Barber shop', style: const TextStyle(fontWeight: FontWeight.w800)), if (mode != 1) Text(barberData['ownerName'] as String? ?? '', style: TextStyle(color: muted, fontSize: 12)), if (mode == 1) Text(booking['customer'] is Map ? (booking['customer']['name'] as String? ?? '') : '', style: TextStyle(color: muted, fontSize: 12))])), Container(padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5), decoration: BoxDecoration(color: statusColor.withValues(alpha: .12), borderRadius: BorderRadius.circular(20)), child: Text(status.toUpperCase(), style: TextStyle(color: statusColor, fontSize: 9, fontWeight: FontWeight.bold)))]),
       const Divider(height: 25), detailRow(Icons.calendar_month_outlined, '${booking['date']}  ·  ${booking['time']}'), detailRow(Icons.content_cut_rounded, '${booking['service']}  ·  ₹${booking['total']}'),
       if (mode == 2 && booking['customer'] is Map) detailRow(Icons.person_outline_rounded, 'Customer: ${booking['customer']['name']} · ${booking['customer']['email']}'),
       if (canCancel) SizedBox(width: double.infinity, child: OutlinedButton(onPressed: () => bookingAction(booking['id'] as String, 'cancel'), child: const Text('Cancel appointment'))),
+      if (canReview) SizedBox(width: double.infinity, child: OutlinedButton.icon(onPressed: () => writeReview(booking), icon: const Icon(Icons.star_outline_rounded), label: const Text('Write a review'))),
       if (mode == 1 && status == 'pending') Row(children: [Expanded(child: OutlinedButton(onPressed: () => bookingAction(booking['id'] as String, 'reject'), child: const Text('Decline'))), const SizedBox(width: 8), Expanded(child: FilledButton(onPressed: () => bookingAction(booking['id'] as String, 'accept'), style: FilledButton.styleFrom(backgroundColor: const Color(0xFF258246)), child: const Text('Accept')))]),
       if (mode == 1 && status == 'confirmed') SizedBox(width: double.infinity, child: OutlinedButton(onPressed: () => bookingAction(booking['id'] as String, 'complete'), child: const Text('Mark completed')))
     ]));
@@ -459,11 +623,11 @@ class _BookingShellState extends State<BookingShell> {
 
   Widget profilePage() => ListView(padding: const EdgeInsets.all(20), children: [
     const Text('My profile', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w800)), const SizedBox(height: 20),
-    Container(padding: const EdgeInsets.all(17), decoration: BoxDecoration(color: ink, borderRadius: BorderRadius.circular(20)), child: Row(children: [CircleAvatar(radius: 27, backgroundColor: const Color(0xFFF1E6D0), child: Text((currentUser?['name'] as String? ?? 'U').substring(0, 1).toUpperCase(), style: const TextStyle(color: ink, fontSize: 22, fontWeight: FontWeight.bold))), const SizedBox(width: 13), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(currentUser?['name'] as String? ?? 'Customer', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(currentUser?['email'] as String? ?? '', style: const TextStyle(color: Colors.white60, fontSize: 12))])), IconButton(onPressed: () {}, icon: const Icon(Icons.edit_outlined, color: gold))])),
+    Container(padding: const EdgeInsets.all(17), decoration: BoxDecoration(color: ink, borderRadius: BorderRadius.circular(20)), child: Row(children: [CircleAvatar(radius: 27, backgroundColor: const Color(0xFFF1E6D0), child: Text((currentUser?['name'] as String? ?? 'U').substring(0, 1).toUpperCase(), style: const TextStyle(color: ink, fontSize: 22, fontWeight: FontWeight.bold))), const SizedBox(width: 13), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(currentUser?['name'] as String? ?? 'Customer', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(currentUser?['email'] as String? ?? '', style: const TextStyle(color: Colors.white60, fontSize: 12))])), IconButton(tooltip: 'Edit profile', onPressed: editProfileDialog, icon: const Icon(Icons.edit_outlined, color: gold))])),
     const SizedBox(height: 22), ...[
       (Icons.calendar_month_outlined, 'My bookings'), (Icons.favorite_border_rounded, 'Favourites'), (Icons.credit_card_outlined, 'Payment methods'), (Icons.star_outline_rounded, 'Reviews'), (Icons.notifications_none_rounded, 'Notifications'), (Icons.help_outline_rounded, 'Help & support'), (Icons.privacy_tip_outlined, 'Terms & privacy'),
-    ].map((entry) => ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 4), leading: Icon(entry.$1, color: const Color(0xFF586366), size: 21), title: Text(entry.$2, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)), trailing: const Icon(Icons.chevron_right_rounded, color: muted), onTap: () { if (entry.$2 == 'My bookings') setState(() => tab = 1); })),
-      const SizedBox(height: 10), Center(child: TextButton(onPressed: () => setState(() { signedIn = false; mode = 0; tab = 0; }), child: const Text('Log out', style: TextStyle(color: Color(0xFFB74B3B), fontWeight: FontWeight.bold))))
+    ].map((entry) => ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 4), leading: Icon(entry.$1, color: const Color(0xFF586366), size: 21), title: Text(entry.$2, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)), trailing: const Icon(Icons.chevron_right_rounded, color: muted), onTap: () => openProfileAction(entry.$2))),
+      const SizedBox(height: 10), Center(child: TextButton(onPressed: signOut, child: const Text('Log out', style: TextStyle(color: Color(0xFFB74B3B), fontWeight: FontWeight.bold))))
   ]);
 
   Widget barberDashboard() => ListView(padding: const EdgeInsets.all(20), children: [

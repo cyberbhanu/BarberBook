@@ -18,7 +18,7 @@ const seedServices = [
 let db;
 let writeQueue = Promise.resolve();
 
-function emptyDb() { return { users: [], barbers: [], bookings: [] }; }
+function emptyDb() { return { users: [], barbers: [], bookings: [], reviews: [] }; }
 async function save() {
   writeQueue = writeQueue.then(async () => {
     await mkdir(dirname(dbPath), { recursive: true });
@@ -134,7 +134,19 @@ async function route(req, res) {
   if (path === '/me' && req.method === 'GET') {
     const user = requireAuth(req);
     const barber = db.barbers.find((b) => b.ownerId === user.id);
-    return json(res, 200, { user: safeUser(user), barber: barber ? publicBarber(barber) : null });
+    return json(res, 200, { user: { ...safeUser(user), favoriteBarberIds: user.favoriteBarberIds ?? [] }, barber: barber ? publicBarber(barber) : null });
+  }
+  if (path === '/me' && req.method === 'PATCH') {
+    const user = requireAuth(req);
+    if (input.name != null) user.name = required(input.name, 'Name');
+    if (input.phone != null) user.phone = String(input.phone).trim();
+    if (input.favoriteBarberIds != null) {
+      if (!Array.isArray(input.favoriteBarberIds)) throw Object.assign(new Error('Favorites must be a list of barbers.'), { status: 400 });
+      const approvedIds = new Set(db.barbers.filter((b) => b.status === 'approved').map((b) => b.id));
+      user.favoriteBarberIds = [...new Set(input.favoriteBarberIds.filter((id) => typeof id === 'string' && approvedIds.has(id)))];
+    }
+    await save();
+    return json(res, 200, { user: { ...safeUser(user), favoriteBarberIds: user.favoriteBarberIds ?? [] } });
   }
   if (path === '/admin/overview' && req.method === 'GET') {
     requireAuth(req, ['admin']);
@@ -178,6 +190,31 @@ async function route(req, res) {
     else if (user.role === 'barber') { const profile = db.barbers.find((b) => b.ownerId === user.id); rows = db.bookings.filter((b) => b.barberId === profile?.id); }
     else rows = db.bookings.filter((b) => b.customerId === user.id);
     return json(res, 200, { bookings: rows.map((b) => ({ ...b, customer: safeUser(db.users.find((u) => u.id === b.customerId)), barber: publicBarber(db.barbers.find((p) => p.id === b.barberId)) })) });
+  }
+  if (path === '/reviews' && req.method === 'GET') {
+    const user = requireAuth(req);
+    const rows = db.reviews.filter((review) => user.role === 'admin' ||
+      (user.role === 'customer' && review.customerId === user.id) ||
+      (user.role === 'barber' && db.barbers.some((barber) => barber.id === review.barberId && barber.ownerId === user.id)));
+    return json(res, 200, { reviews: rows.map((review) => ({ ...review,
+      customer: safeUser(db.users.find((item) => item.id === review.customerId)),
+      barber: publicBarber(db.barbers.find((item) => item.id === review.barberId)) })) });
+  }
+  if (path === '/reviews' && req.method === 'POST') {
+    const user = requireAuth(req, ['customer']);
+    const bookingId = required(input.bookingId, 'Booking');
+    const booking = db.bookings.find((item) => item.id === bookingId && item.customerId === user.id && item.status === 'completed');
+    if (!booking) throw Object.assign(new Error('You can review a completed appointment only.'), { status: 400 });
+    if (db.reviews.some((review) => review.bookingId === booking.id)) throw Object.assign(new Error('This appointment already has a review.'), { status: 409 });
+    const rating = Number(input.rating);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw Object.assign(new Error('Choose a rating from 1 to 5 stars.'), { status: 400 });
+    const review = { id: randomUUID(), customerId: user.id, barberId: booking.barberId, bookingId: booking.id,
+      rating, comment: String(input.comment || '').trim().slice(0, 1000), createdAt: new Date().toISOString() };
+    db.reviews.push(review);
+    const barber = db.barbers.find((item) => item.id === booking.barberId);
+    if (barber) barber.rating = Math.round(db.reviews.filter((item) => item.barberId === barber.id).reduce((sum, item) => sum + item.rating, 0) / db.reviews.filter((item) => item.barberId === barber.id).length * 10) / 10;
+    await save();
+    return json(res, 201, { review });
   }
   if (path === '/bookings' && req.method === 'POST') {
     const user = requireAuth(req, ['customer']);
@@ -242,6 +279,7 @@ async function route(req, res) {
 
 async function main() {
   try { db = JSON.parse(await readFile(dbPath, 'utf8')); } catch { db = emptyDb(); }
+  if (!Array.isArray(db.reviews)) db.reviews = [];
   if (!db.users.some((u) => u.role === 'admin')) {
     const email = process.env.ADMIN_EMAIL || 'admin@barberbook.local';
     const password = process.env.ADMIN_PASSWORD || randomBytes(24).toString('base64url');

@@ -54,4 +54,5 @@ class BarberBookApi {
 
   Future<Map<String, dynamic>> get(String path) => request(path, authenticated: true);
   Future<Map<String, dynamic>> post(String path, Map<String, dynamic> data) => request(path, method: 'POST', data: data, authenticated: true);
+  Future<Map<String, dynamic>> patch(String path, Map<String, dynamic> data) => request(path, method: 'PATCH', data: data, authenticated: true);
 }
