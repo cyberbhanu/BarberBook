@@ -281,7 +281,7 @@ async function main() {
   try { db = JSON.parse(await readFile(dbPath, 'utf8')); } catch { db = emptyDb(); }
   if (!Array.isArray(db.reviews)) db.reviews = [];
   if (!db.users.some((u) => u.role === 'admin')) {
-    const email = process.env.ADMIN_EMAIL || 'admin@barberbook.local';
+    const email = process.env.ADMIN_EMAIL || 'admin@barberbook.com';
     const password = process.env.ADMIN_PASSWORD || randomBytes(24).toString('base64url');
     const user = { id: randomUUID(), name: 'BarberBook Admin', email, phone: '', role: 'admin', status: 'active', password: await hashPassword(password), createdAt: new Date().toISOString() };
     db.users.push(user); await save();

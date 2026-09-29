@@ -13,7 +13,7 @@ $env:ADMIN_PASSWORD = 'choose-a-private-password'
 node api/server.mjs
 ```
 
-The initial admin email is `admin@barberbook.local`. The API saves account and booking data to `api/data.json` and listens on port `8787`. You can change the admin password from the app after signing in.
+The initial admin email is `admin@barberbook.com`. The API saves account and booking data to `api/data.json` and listens on port `8787`. You can change the admin password from the app after signing in.
 
 Terminal 2 runs Flutter Web:
 
