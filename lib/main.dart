@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 import 'api_service.dart';
 import 'booking_export.dart';
@@ -285,6 +286,51 @@ class _BookingShellState extends State<BookingShell> {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
     } finally {
       if (mounted) setState(() => locationLoading = false);
+    }
+  }
+
+  ImageProvider? imageDataProvider(Object? value) {
+    if (value is! String || !value.startsWith('data:image/')) return null;
+    final separator = value.indexOf(',');
+    if (separator < 0) return null;
+    try { return MemoryImage(base64Decode(value.substring(separator + 1))); } catch (_) { return null; }
+  }
+
+  ImageProvider? barberLogoProvider(String barberId) {
+    for (final row in remoteBarbers.whereType<Map>()) {
+      if (row['id'] == barberId) return imageDataProvider(row['logoData']);
+    }
+    if (currentBarber?['id'] == barberId) return imageDataProvider(currentBarber?['logoData']);
+    return null;
+  }
+
+  Future<void> chooseProfileImage({required bool forBarber}) async {
+    try {
+      final image = await ImagePicker().pickImage(
+        source: ImageSource.gallery, maxWidth: 900, maxHeight: 900, imageQuality: 75,
+      );
+      if (image == null) return;
+      final bytes = await image.readAsBytes();
+      if (bytes.length > 450000) {
+        throw Exception('Choose an image under 450 KB. Try a smaller image.');
+      }
+      var mime = image.mimeType?.toLowerCase();
+      mime ??= image.name.toLowerCase().endsWith('.png') ? 'image/png' : image.name.toLowerCase().endsWith('.webp') ? 'image/webp' : 'image/jpeg';
+      if (!const {'image/jpeg', 'image/png', 'image/webp'}.contains(mime)) {
+        throw Exception('Choose a JPEG, PNG, or WebP image.');
+      }
+      final key = forBarber ? 'logoData' : 'profileImageData';
+      final result = await api.patch('/me', {key: 'data:$mime;base64,${base64Encode(bytes)}'});
+      if (!mounted) return;
+      final user = Map<String, dynamic>.from(result['user'] as Map);
+      setState(() {
+        currentUser = user;
+        if (result['barber'] is Map) currentBarber = Map<String, dynamic>.from(result['barber'] as Map);
+      });
+      if (forBarber) await refreshData(silent: true);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(forBarber ? 'Shop logo updated.' : 'Profile photo updated.')));
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))));
     }
   }
 
@@ -779,7 +825,7 @@ class _BookingShellState extends State<BookingShell> {
   Widget serviceChip(String title, IconData icon) => InkWell(onTap: () => setState(() => selectedServiceFilter = selectedServiceFilter == title ? null : title), borderRadius: BorderRadius.circular(16), child: Container(width: 78, margin: const EdgeInsets.only(right: 10), padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: selectedServiceFilter == title ? ink : Colors.white, borderRadius: BorderRadius.circular(16)), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(icon, color: selectedServiceFilter == title ? gold : const Color(0xFFAD7A29), size: 23), const SizedBox(height: 6), Text(title, maxLines: 1, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: selectedServiceFilter == title ? Colors.white : ink))])));
 
   Widget barberCard(Barber barber) => Container(margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(12), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18)), child: Row(children: [
-    Container(width: 66, height: 72, decoration: BoxDecoration(color: barber.color, borderRadius: BorderRadius.circular(14)), child: Center(child: Text(barber.initials, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20)))),
+    Container(width: 66, height: 72, decoration: BoxDecoration(color: barber.color, borderRadius: BorderRadius.circular(14)), clipBehavior: Clip.antiAlias, child: barberLogoProvider(barber.id) == null ? Center(child: Text(barber.initials, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20))) : Image(image: barberLogoProvider(barber.id)!, fit: BoxFit.cover)),
     const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(barber.shop, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)), const SizedBox(height: 4), Text(barber.name, style: TextStyle(color: muted, fontSize: 11)), const SizedBox(height: 7), Row(children: [const Icon(Icons.star_rounded, color: gold, size: 14), Text(' ${barber.rating}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700)), Text('  ·  ${barber.distance}  ·  ${barber.price}+', style: TextStyle(color: muted, fontSize: 10))])])),
     IconButton(tooltip: favoriteBarberIds.contains(barber.id) ? 'Remove from favourites' : 'Add to favourites', onPressed: () => toggleFavorite(barber), icon: Icon(favoriteBarberIds.contains(barber.id) ? Icons.favorite : Icons.favorite_border, color: const Color(0xFFB74B3B), size: 20)),
     const SizedBox(width: 2), FilledButton(onPressed: () => startBooking(barber), style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: ink, padding: const EdgeInsets.symmetric(horizontal: 13), minimumSize: const Size(0, 38), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11))), child: const Text('Book', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12)))
@@ -819,7 +865,7 @@ class _BookingShellState extends State<BookingShell> {
 
   Widget profilePage() => ListView(padding: const EdgeInsets.all(20), children: [
     const Text('My profile', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w800)), const SizedBox(height: 20),
-    Container(padding: const EdgeInsets.all(17), decoration: BoxDecoration(color: ink, borderRadius: BorderRadius.circular(20)), child: Row(children: [CircleAvatar(radius: 27, backgroundColor: const Color(0xFFF1E6D0), child: Text((currentUser?['name'] as String? ?? 'U').substring(0, 1).toUpperCase(), style: const TextStyle(color: ink, fontSize: 22, fontWeight: FontWeight.bold))), const SizedBox(width: 13), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(currentUser?['name'] as String? ?? 'Customer', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(currentUser?['email'] as String? ?? '', style: const TextStyle(color: Colors.white60, fontSize: 12))])), IconButton(tooltip: 'Edit profile', onPressed: editProfileDialog, icon: const Icon(Icons.edit_outlined, color: gold))])),
+    Container(padding: const EdgeInsets.all(17), decoration: BoxDecoration(color: ink, borderRadius: BorderRadius.circular(20)), child: Row(children: [CircleAvatar(radius: 27, backgroundColor: const Color(0xFFF1E6D0), backgroundImage: imageDataProvider(currentUser?['profileImageData']), child: imageDataProvider(currentUser?['profileImageData']) == null ? Text((currentUser?['name'] as String? ?? 'U').substring(0, 1).toUpperCase(), style: const TextStyle(color: ink, fontSize: 22, fontWeight: FontWeight.bold)) : null), const SizedBox(width: 13), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(currentUser?['name'] as String? ?? 'Customer', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)), const SizedBox(height: 4), Text(currentUser?['email'] as String? ?? '', style: const TextStyle(color: Colors.white60, fontSize: 12))])), IconButton(tooltip: 'Add or change profile photo', onPressed: () => chooseProfileImage(forBarber: false), icon: const Icon(Icons.add_a_photo_outlined, color: gold)), IconButton(tooltip: 'Edit profile', onPressed: editProfileDialog, icon: const Icon(Icons.edit_outlined, color: gold))])),
     const SizedBox(height: 22), ...[
       (Icons.calendar_month_outlined, 'My bookings'), (Icons.favorite_border_rounded, 'Favourites'), (Icons.credit_card_outlined, 'Payment methods'), (Icons.star_outline_rounded, 'Reviews'), (Icons.notifications_none_rounded, 'Notifications'), (Icons.help_outline_rounded, 'Help & support'), (Icons.privacy_tip_outlined, 'Terms & privacy'),
     ].map((entry) => ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 4), leading: Icon(entry.$1, color: const Color(0xFF586366), size: 21), title: Text(entry.$2, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)), trailing: const Icon(Icons.chevron_right_rounded, color: muted), onTap: () => openProfileAction(entry.$2))),
@@ -827,7 +873,7 @@ class _BookingShellState extends State<BookingShell> {
   ]);
 
   Widget barberDashboard() => ListView(padding: const EdgeInsets.all(20), children: [
-    Text('Good morning, ${currentUser?['name'] ?? 'Barber'} 👋', style: const TextStyle(fontSize: 23, fontWeight: FontWeight.w800)),
+    Row(children: [InkWell(onTap: () => chooseProfileImage(forBarber: true), borderRadius: BorderRadius.circular(32), child: CircleAvatar(radius: 27, backgroundColor: ink, backgroundImage: imageDataProvider(currentBarber?['logoData']), child: imageDataProvider(currentBarber?['logoData']) == null ? const Icon(Icons.add_a_photo_outlined, color: gold, size: 20) : null)), const SizedBox(width: 12), Expanded(child: Text('Good morning, ${currentUser?['name'] ?? 'Barber'} 👋', style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w800)))]),
     const SizedBox(height: 4), Text('Here’s how your shop is doing today.', style: TextStyle(color: muted, fontSize: 12)),
     const SizedBox(height: 18),
     Row(children: [Expanded(child: metricCard('Bookings', '${remoteBookings.length}', Icons.calendar_today_outlined, const Color(0xFFE7F0FA))), const SizedBox(width: 10), Expanded(child: metricCard('Earnings', '₹${remoteBookings.whereType<Map>().where((b) => b['status'] == 'completed').fold<int>(0, (sum, b) => sum + ((b['total'] as num?)?.toInt() ?? 0))}', Icons.currency_rupee, const Color(0xFFE5F4E9)))]),
@@ -842,6 +888,7 @@ class _BookingShellState extends State<BookingShell> {
   ]);
 
   Widget barberServices() => ListView(padding: const EdgeInsets.all(20), children: [
+    Container(margin: const EdgeInsets.only(bottom: 18), padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)), child: Row(children: [CircleAvatar(radius: 25, backgroundColor: ink, backgroundImage: imageDataProvider(currentBarber?['logoData']), child: imageDataProvider(currentBarber?['logoData']) == null ? const Icon(Icons.storefront_outlined, color: gold) : null), const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Shop logo', style: TextStyle(fontWeight: FontWeight.w800)), Text(currentBarber?['shop'] as String? ?? 'Your shop', style: TextStyle(color: muted, fontSize: 12))])), OutlinedButton.icon(onPressed: () => chooseProfileImage(forBarber: true), icon: const Icon(Icons.upload_outlined), label: const Text('Add logo'))])),
     const Text('My services', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)), const SizedBox(height: 4), Text('Set the services customers can book.', style: TextStyle(color: muted, fontSize: 12)), const SizedBox(height: 18),
     if (barberServicesRemote.isEmpty) Text('No services yet.', style: TextStyle(color: muted, fontSize: 12)) else ...barberServicesRemote.whereType<Map>().where((s) => s['enabled'] == true).map((s) => Container(margin: const EdgeInsets.only(bottom: 10), padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)), child: Row(children: [Container(width: 42, height: 42, decoration: BoxDecoration(color: gold.withValues(alpha: .18), borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.content_cut_rounded, color: Color(0xFFAD7A29))), const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(s['name'] as String? ?? 'Service', style: const TextStyle(fontWeight: FontWeight.w800)), Text('${s['duration']} min', style: TextStyle(color: muted, fontSize: 11))])), Text('₹${s['price']}', style: const TextStyle(fontWeight: FontWeight.w800)), IconButton(onPressed: () => editBarberService(s), icon: const Icon(Icons.edit_outlined, size: 18, color: muted))]))),
     SizedBox(height: 48, child: OutlinedButton.icon(onPressed: addBarberService, icon: const Icon(Icons.add), label: const Text('Add service'))), const SizedBox(height: 20),

@@ -32,11 +32,18 @@ async function verifyPassword(password, saved) {
   const b = Buffer.from(saved.hash, 'hex');
   return a.length === b.length && timingSafeEqual(a, b);
 }
+function validateImageData(value, label) {
+  if (typeof value !== 'string' || value.length > 650_000 ||
+      !/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    throw Object.assign(new Error(`${label} must be a JPEG, PNG, or WebP image under 450 KB.`), { status: 400 });
+  }
+  return value;
+}
 function publicBarber(barber) {
   const owner = db.users.find((u) => u.id === barber.ownerId);
   return { id: barber.id, ownerId: barber.ownerId, ownerName: owner?.name ?? '', shop: barber.shop,
     address: barber.address, phone: owner?.phone ?? '', status: barber.status, rating: barber.rating ?? 5,
-    services: barber.services, availability: barber.availability, createdAt: barber.createdAt };
+    services: barber.services, availability: barber.availability, logoData: barber.logoData ?? null, createdAt: barber.createdAt };
 }
 function safeUser(user) { return { id: user.id, name: user.name, email: user.email, phone: user.phone, role: user.role, status: user.status }; }
 function json(res, status, body) {
@@ -127,7 +134,7 @@ async function route(req, res) {
   if (path === '/me' && req.method === 'GET') {
     const user = requireAuth(req);
     const barber = db.barbers.find((b) => b.ownerId === user.id);
-    return json(res, 200, { user: { ...safeUser(user), favoriteBarberIds: user.favoriteBarberIds ?? [] }, barber: barber ? publicBarber(barber) : null });
+    return json(res, 200, { user: { ...safeUser(user), profileImageData: user.profileImageData ?? null, favoriteBarberIds: user.favoriteBarberIds ?? [] }, barber: barber ? publicBarber(barber) : null });
   }
   if (path === '/me' && req.method === 'PATCH') {
     const user = requireAuth(req);
@@ -138,8 +145,17 @@ async function route(req, res) {
       const approvedIds = new Set(db.barbers.filter((b) => b.status === 'approved').map((b) => b.id));
       user.favoriteBarberIds = [...new Set(input.favoriteBarberIds.filter((id) => typeof id === 'string' && approvedIds.has(id)))];
     }
+    if (Object.hasOwn(input, 'profileImageData')) {
+      if (user.role !== 'customer') throw Object.assign(new Error('Only customer accounts can update a profile photo.'), { status: 403 });
+      user.profileImageData = input.profileImageData == null ? null : validateImageData(input.profileImageData, 'Profile photo');
+    }
+    const barber = db.barbers.find((item) => item.ownerId === user.id);
+    if (Object.hasOwn(input, 'logoData')) {
+      if (user.role !== 'barber' || !barber) throw Object.assign(new Error('Only barber accounts can update a shop logo.'), { status: 403 });
+      barber.logoData = input.logoData == null ? null : validateImageData(input.logoData, 'Shop logo');
+    }
     await save();
-    return json(res, 200, { user: { ...safeUser(user), favoriteBarberIds: user.favoriteBarberIds ?? [] } });
+    return json(res, 200, { user: { ...safeUser(user), profileImageData: user.profileImageData ?? null, favoriteBarberIds: user.favoriteBarberIds ?? [] }, barber: barber ? publicBarber(barber) : null });
   }
   if (path === '/admin/overview' && req.method === 'GET') {
     requireAuth(req, ['admin']);
