@@ -1,8 +1,8 @@
 import { createServer } from 'node:http';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
+import { loadDatabase, saveDatabase } from './database.mjs';
 
 const scrypt = promisify(scryptCallback);
 const port = Number(process.env.PORT || 8787);
@@ -18,15 +18,8 @@ const seedServices = [
 let db;
 let writeQueue = Promise.resolve();
 
-function emptyDb() { return { users: [], barbers: [], bookings: [], reviews: [] }; }
 async function save() {
-  writeQueue = writeQueue.then(async () => {
-    await mkdir(dirname(dbPath), { recursive: true });
-    const temp = `${dbPath}.tmp`;
-    await writeFile(temp, JSON.stringify(db, null, 2), 'utf8');
-    const { rename } = await import('node:fs/promises');
-    await rename(temp, dbPath);
-  });
+  writeQueue = writeQueue.catch(() => {}).then(() => saveDatabase(db, dbPath));
   return writeQueue;
 }
 async function hashPassword(password, salt = randomBytes(16).toString('hex')) {
@@ -299,7 +292,7 @@ async function route(req, res) {
 }
 
 async function main() {
-  try { db = JSON.parse(await readFile(dbPath, 'utf8')); } catch { db = emptyDb(); }
+  db = await loadDatabase(dbPath);
   if (!Array.isArray(db.reviews)) db.reviews = [];
   if (!db.users.some((u) => u.role === 'admin')) {
     const email = process.env.ADMIN_EMAIL || 'admin@barberbook.com';

@@ -46,6 +46,30 @@ flutter build apk --release
 
 The APK is written to `build\app\outputs\flutter-apk\app-release.apk`. iOS builds require macOS and Xcode; this repository now includes the iOS project scaffold as well.
 
+## Deploy the API with Supabase
+
+The API uses `api/data.json` for local development. When both `SUPABASE_URL` and `SUPABASE_SECRET_KEY` are set, it stores the same BarberBook state in Supabase Postgres through the REST API. The older `SUPABASE_SERVICE_ROLE_KEY` is also supported. Keep either server key on the server only; never put it in Flutter or commit it to Git.
+
+1. Create a Supabase project and run [`api/supabase-schema.sql`](api/supabase-schema.sql) in the Supabase SQL Editor.
+2. For an existing local database, migrate it once before connecting the deployed API. In PowerShell, from the repository root:
+
+   ```powershell
+   $env:SUPABASE_URL = 'https://<project-ref>.supabase.co'
+   $env:SUPABASE_SECRET_KEY = '<server-side secret key>'
+   node api/migrate-to-supabase.mjs
+   ```
+
+   The migration stops if the cloud state row already exists. It copies the local users, barber profiles, bookings, reviews, and password hashes. Treat the key and migrated data as private.
+
+3. In the Render API Web Service, keep **Root Directory** blank, use `node api/server.mjs` as the start command, and set `SUPABASE_URL` and `SUPABASE_SECRET_KEY` as environment variables. Remove `BARBERBOOK_DB`; no Render disk is needed.
+4. Build the web app using the deployed API URL, then deploy `build/web` to static hosting:
+
+   ```powershell
+   flutter build web --release --dart-define=API_BASE_URL=https://<your-render-service>.onrender.com
+   ```
+
+Supabase Free projects can pause after a period of low activity, and Render Free web services sleep after 15 minutes without requests. This is suitable for a demo, not a production availability guarantee. Local JSON storage remains in place when Supabase environment variables are absent.
+
 ## Account and approval flow
 
 - Customers create an account and sign in to browse approved shops, book services, and manage appointments.
@@ -53,4 +77,4 @@ The APK is written to `build\app\outputs\flutter-apk\app-release.apk`. iOS build
 - Admins can approve or reject applications, or create an approved barber account and choose its initial password.
 - Barber accounts can manage services and availability, and accept, decline, or complete appointments.
 
-Passwords are hashed on the local API. Sessions are held in memory and expire after 12 hours. This setup is for local development on one computer; it is not deployed for remote or multi-device use. It does not yet connect SMS OTP, a payment gateway, or production hosting. Use TLS, a managed database, secure secret storage, and a deployed API before using real customer data.
+Passwords are hashed by the API. Sessions are held in memory and expire after 12 hours. The app does not yet connect SMS OTP or a payment gateway.
